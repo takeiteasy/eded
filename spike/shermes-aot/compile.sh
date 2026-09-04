@@ -18,12 +18,16 @@ export HermesSourcePath="$HERMES_SRC"
 here="$(cd "$(dirname "$0")" && pwd)"
 file="${1:?usage: compile.sh <file.js>}"
 name="$(basename "${file%.*}")"
+# upstream wasm-compile.sh is CWD-relative; pin everything to the input's dir
+input_dir="$(cd "$(dirname "$file")" && pwd)"
+file="$input_dir/$(basename "$file")"
+cd "$input_dir"
 
 "$HERMES_SRC/utils/wasm-compile.sh" "$HOST_BUILD" "$WASM_BUILD" "$file"
 
 # Relink with eded's overrides (see eded-random.js: upstream randomFill
 # aborts in browsers because WebCrypto rejects resizable heap views).
-emcc -O3 "$name.o" -o "$name-wasm.js" \
+emcc -O3 "$input_dir/$name.o" -o "$input_dir/$name-wasm.js" \
     -L"$WASM_BUILD/lib" \
     -L"$WASM_BUILD/jsi" \
     -L"$WASM_BUILD/tools/shermes" \
@@ -31,4 +35,4 @@ emcc -O3 "$name.o" -o "$name-wasm.js" \
     -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=256KB \
     --js-library "$here/eded-random.js"
 
-ls -lh "$name-wasm".*
+ls -lh "$input_dir/$name-wasm".*

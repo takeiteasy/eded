@@ -119,7 +119,12 @@ plays the role wisc played in wisp2); flip to the wasm target per milestone.
 - **M2 KILL-TEST**: cordis's load-bearing ES features under AOT — Proxy traps
   (cordis's Context/DI is Proxy-based), WeakRef, async/await, class static
   blocks, private fields. If red, stop, invoke the fallback ladder.
-- **M3 cordis AOT end to end**: esbuild IIFE -> hermesc -> C/link -> wasm;
+  **Done 2026-09-04: GREEN** (11/11 probes on native + wasm + browser; one
+  compile-level caveat — shermes rejects `async function*`, and the cordis
+  bundle contains one; mitigated in M3 by esbuild `--target=es2017`
+  lowering. See FINDINGS.md).
+- **M3 cordis AOT end to end**: esbuild IIFE (`--target=es2017` to lower
+  async generators; see M2 findings) -> hermesc -> C/link -> wasm;
   lifecycle test (provide / inject / effect / dispose) under a wasm runtime.
 - **M4 wisp runtime + plugin**: AOT both compiled-in and eval-at-runtime;
   decides plugin model B1 (embedded interpreter, easy authoring, shared heap)

@@ -82,8 +82,10 @@ is treated as reference only.
   as a required flag).
 - The wasm VM smoke test (`node build/shermes-wasm/bin/hermes.js hello.js`)
   also exits clean now — fix 1 covers the interpreter path too.
-- Native `shermes` has no `-eval` flag; feed it files (`-Xenable-tdz` is the
-  flag upstream's pipeline uses).
+- Native `shermes` executes with **`-exec`** (`shermes -exec -Xenable-tdz
+  file.js`); without it the driver only compiles. Native linking needs the
+  console libs built explicitly (`ninja -C build/shermes-host
+  shermes_console_a shermes_console`) — not part of the default target set.
 
 ### Numbers (M1)
 
@@ -102,3 +104,107 @@ is treated as reference only.
 - If M2 needs pthreads for some reason, the decision above gets revisited —
   the patch is scoped by `!__EMSCRIPTEN_PTHREADS__` so a pthreads rebuild is
   still possible without touching the patch.
+
+## M2 — kill-test (2026-09-04) : GREEN (one compile-level caveat)
+
+### What was built
+
+- `spike/kill-test/` — cordis-grounded probe suite (11 probes, `probes/p01…p11`),
+  each self-contained JS printing `PASS|FAIL|SKIP name — detail` + `RESULT`,
+  exit code = failure count. Probes derived from an actual source skim of
+  `@deepseek-ai/cordis@4.0.2` (`node_modules` local, gitignored; version
+  pinned by `spike/kill-test/package.json`).
+- `run-native.sh` (per-probe `shermes -exec -Xenable-tdz`, fast loop),
+  `build-suite.sh` (concatenates probes in IIFEs + a shared reporter — one
+  wasm module for all probes), `run-wasm.sh` (M1 pipeline → node),
+  `index.html` (browser host, verdict line). `preflight.js` documents
+  drain semantics.
+
+### Verdict
+
+**GREEN on all three rungs**: native (11/11), wasm under node (11/11),
+browser (visually confirmed via console verdict line). Only SKIP: async
+generators (below). **Zero semantic divergences found between shermes AOT
+(native or wasm) and node 26** — every probe discrepancy during development
+was a probe bug, and node always failed identically when one existed.
+
+### The caveat: async generators are a compile-level rejection
+
+`shermes` rejects `async function*` at compile time (preflight + p05). This
+matters because the cordis bundle **contains one**
+(`AsyncGeneratorFunction = async function*(){}.constructor`). Not a semantic
+kill: the M3 pipeline mitigates by bundling with
+`esbuild --target=es2017`, which lowers async generators to sync generators
++ promise state machines (both proven green here). Sync generators,
+async/await, custom thenables and Promise combinators are all green.
+
+### What was proven (cordis's load-bearing surface)
+
+- **Proxy**: shared handler objects (get/set/has), receiver plumbing through
+  `Reflect.get(target, prop, receiver)`, throwing traps, `in`/`has`, symbol
+  props through traps, `Object.create(proxy)` prototype chains (trap
+  fallthrough through inheritance, two hops), apply-trap proxies over
+  functions, prototype-swapped callables. One **receiver-vs-target subtlety**
+  surfaced: a trap's `target` is always the root's backing object, so
+  per-child state must be resolved via the receiver — cordis's fiber walk
+  does exactly this.
+- **Callable objects**: cordis's `createCallable` shape requires
+  `Function.prototype` kept in the swapped prototype chain (that is what
+  `joinPrototype(proto, Function.prototype)` is for) — otherwise `.bind`
+  vanish. Proven both ways.
+- **Classes**: bare instance fields, static fields, static blocks writing
+  symbol-keyed prototype props, getters/setters, constructor returning an
+  object, `static [Symbol.hasInstance]` prototype walks (note: the walk
+  misses the class itself — `.constructor` is `Function` — matching cordis,
+  which only classifies instances), class expressions, `extends`/`super`.
+- **async**: chains, `Promise.all`/`allSettled`, rejection propagation,
+  microtask ordering (native drains at exit — output order matches node),
+  custom thenables (`wrapper.then = async …`, cordis's effect wrapper),
+  thenable-through-Promise chaining.
+- **Weak collections**: DisposableList shape (Map order + WeakMap reverse
+  lookup, `clear()` reverses), Map insertion-order/re-insert semantics,
+  WeakRef deref-while-held, FinalizationRegistry construct+register. GC
+  timing is not asserted anywhere — Hermes uses conservative stack scanning,
+  so unreachable-but-on-stack objects may survive collection (engine
+  property, not an AOT defect). WeakMap accepts symbol keys (ES2023) — the
+  mini-Context store relies on it.
+- **Errors**: subclassing + instanceof, `Error.stack` string surgery
+  (split/splice/Infinity/join, frame `endsWith`), prototype brand markers.
+- **Private fields** (#field/#method/static/#in, brand collisions) — green,
+  though cordis itself uses none.
+- **Mini cordis-shaped Context (p11)**: provide/inject through the proxy,
+  `extend()` via `Object.create(proxy)` + descriptor defines, `isolate()`
+  label shadows, effects with sync/async bodies and sync/async disposers,
+  `start()` = Promise.all, `dispose()` = reversed clear + awaited disposers,
+  service unload after dispose, inject-miss throws the cordis-shaped error.
+  Full lifecycle green on all rungs.
+
+### New native/driver findings
+
+- **`-exec` is the native execution flag** (corrects M1's note above);
+  `shermes file.js` alone only compiles.
+- Native linking needs `shermes_console_a`/`shermes_console` built
+  explicitly; they are not in the default target set.
+- **Native shermes swallows unhandled promise rejections silently (exit 0)**.
+  Node 26 makes them fatal. The native runner therefore requires a `RESULT`
+  line per probe (silence ≠ pass). Browser hosts must hook
+  `onunhandledrejection` (M1's instrumented page already does; carry to M5).
+- `spike/shermes-aot/compile.sh` is now CWD-independent (it `cd`s to the
+  input's directory — upstream `wasm-compile.sh` and emcc write outputs
+  relative to the working directory, not the input path).
+
+### Numbers (M2)
+
+- Suite module: **3.8 MB** wasm (`-O3`, unstripped) vs 3.2 MB for M1 hello —
+  the whole 11-probe suite costs +0.6 MB over the bare runtime.
+- Native per-probe compile+run: sub-second (fast dev loop confirmed).
+- cordis reference: 4.0.2, 1828-line ESM bundle.
+
+### Carried to M3
+
+- Bundle real cordis with `esbuild --target=es2017` (async-generator
+  lowering) — validate the `AsyncGeneratorFunction` line compiles lowered.
+- Keep `-Xenable-tdz`; the IIFE-concatenation pattern is proven if a single
+  module ever needs multiple sources.
+- `isConstructor` heuristic (`.prototype` + GeneratorFunction exclusion)
+  proven — wisp2's `defplugin` arrow-plugin guidance stands.
