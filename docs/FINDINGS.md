@@ -272,8 +272,8 @@ Consequences:
   `utils/wasm-compile.sh` hardcodes shermes flags and can't take the flag)
   and bakes in `-Xenable-tdz -Xes6-block-scoping`. M2 suite re-run under the
   new pipeline: still GREEN 11/11.
-- Any M4+ wisp-compiled plugin code with closures in loops needs the same
-  flag — it is in the shared `compile.sh`, so all rungs inherit it.
+- Any plugin-module JS with closures in loops needs the same flag — it is
+  in the shared `compile.sh`, so all rungs and all JS producers inherit it.
 
 Debugging notes worth keeping: `JSON.stringify` silently omits function
 values — it "hid" the `apply` property mid-bisect and nearly misdirected to
@@ -309,12 +309,18 @@ only trustworthy native signal, as M2 already concluded.
 
 ### Carried to M4
 
-- Plugin model decision (B1 embedded interpreter vs B2 per-plugin AOT wasm)
-  now has a data point: the AOT path needs `-Xes6-block-scoping` everywhere
-  JS is compiled (core AND plugins); B1's eval path must ensure the
-  interpreter gets equivalent scoping (verify `hermes` interpreter defaults
-  or flags before M4).
+- **Plugin model decided 2026-09-04: B2 — a plugin is a wasm module.** No
+  eval path in the core; cordis stays in-core and plugins are ABI clients
+  (the core wraps each bridged plugin as an arrow function, dodging the
+  isConstructor gotcha). M4 is therefore the bridge spike: one real plugin
+  module (shermes-JS and/or C toy) across a v0 host-mediated ABI, plus the
+  per-plugin module-size measurement — every shermes-JS module carries its
+  own runtime (~3.2 MB pre-plugin-code at M3 flags); that number decides
+  whether size engineering (-Os, strip, brotli, lazy instantiate) becomes
+  M6 work.
+- The AOT path needs `-Xes6-block-scoping` everywhere JS is compiled (core
+  AND plugin modules). It lives in `compile.sh`, so every JS producer
+  inherits it automatically; authoring tools that merely emit JS need no
+  knowledge of it.
 - Keep `probe-loop-scoping.js` in the re-verification checklist for any
   hermes pin bump.
-- wisp2's emitter should avoid relying on per-iteration loop bindings until
-  the eded pipeline guarantees the flag (it does via compile.sh).

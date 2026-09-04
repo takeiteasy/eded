@@ -1,23 +1,26 @@
 # eded — plan
 
-Single source of truth for the architecture and the work ladder. Written at
-planning time (repo still empty of code); a fresh session should be able to
-start ticket #1 from this document alone.
+Single source of truth for the architecture and the work ladder; a fresh
+session should be able to start any ticket from this document alone.
 
 ## What eded is
 
 A modular editor. cordis (`@deepseek-ai/cordis`, pure ESM) owns the plugin
 lifecycle — DI, startup wiring, teardown. clay (`nicbarker/clay`, single-header
 C) owns layout. The core is ONE wasm module with **no embedded JS engine**:
-the wisp runtime, cordis and plugins are compiled ahead of time to wasm via
+cordis and the core's own JS are compiled ahead of time to wasm via
 **Static Hermes** (facebook/hermes, `static_h` branch — compiles full ES6 to
-wasm; the interpreter is only pulled in for eval/dynamic paths).
+wasm). The interpreter is linked in the current pipeline but nothing evals;
+dropping it for a lean core is an M6 size lever.
 
-[wisp2](https://git.sr.ht/~takeiteasy/wisp) (local: `~/git/wisp`) is the wisp
-compiler. It stays independent of eded and feeds compiled JS into eded's
-pipeline (`wisp -> JS -> hermesc/shermes -> wasm`). Eventually `defplugin`
-moves out of wisp2's core into eded as a user-level `defmacro` (context:
-wisp2 tracker #13).
+**Plugin model (decided 2026-09-04): a plugin is a wasm module, nothing
+else.** The host instantiates plugin modules and bridges them to the core
+through a narrow ABI; cordis stays in the core and plugins are its clients.
+There is no eval path and no privileged plugin language. JS is a first-class
+*producer* (JS -> shermes -> wasm — the exact M3 pipeline), so any tool that
+emits JS (wisp2 included) works as an external authoring option without
+being part of the architecture. eded is a solo project for the foreseeable
+future, so the plugin ABI starts minimal and grows on demand.
 
 ## Architecture
 
@@ -34,11 +37,9 @@ wisp2 tracker #13).
 +---------------------v---------------------------------------------+
 |                    EDED CORE — one wasm module                    |
 |  clay (layout, C) + C ABI dispatcher                              |
-|  AOT-compiled wisp runtime + cordis (no JS engine inside)         |
-|  plugins:                                                         |
-|   - wisp/JS: AOT-compiled (B2) or eval'd via embedded             |
-|     interpreter (B1) — decided by spike ticket #1                 |
-|   - foreign languages: separate wasm modules, host-bridged        |
+|  AOT-compiled cordis (no JS engine inside)                        |
+|  plugins: separate wasm modules, host-instantiated + bridged      |
+|    (any producer: C, Rust, JS via shermes, ...)                   |
 |  Clay_RenderCommandArray -> whichever renderer is attached        |
 +-------------------------------------------------------------------+
 ```
@@ -64,6 +65,13 @@ Design invariants:
 4. **The host ABI is narrow and platform-neutral.** One header
    (`eded_core.h`), implemented by every host. The same core module must run
    under a browser host and a native wasm-runtime host.
+5. **A plugin is a wasm module.** No eval path, no privileged plugin
+   language; plugins reach the core only through the ABI, with the cordis
+   lifecycle managed in-core (each bridged plugin is wrapped as an arrow
+   function — see the isConstructor gotcha). Known cost: every shermes-JS
+   module carries its own runtime (~3.2 MB before plugin code); measure at
+   M4 before deciding whether size engineering (-Os, strip, brotli, lazy
+   instantiate) lands in M6 scope.
 
 ## Why Static Hermes AOT (and the fallback ladder)
 
@@ -71,7 +79,7 @@ The engine question was evaluated against four shapes: quickjs-ng embedded in
 the module, Static Hermes AOT, host-provided JS realm, and small ES5 engines
 (mquickjs/MuJS — non-starters: cordis needs Proxy/WeakRef/async).
 
-Static Hermes AOT won on the goal: wisp plugins become true wasm modules —
+Static Hermes AOT won on the goal: plugins become true wasm modules —
 the purest form of the "wasm core complements cordis modularity" vision — and
 the core carries no interpreter for compiled code.
 
@@ -99,7 +107,7 @@ Tracked on ~takeiteasy/eded:
 | # | Ticket | Substance |
 |---|--------|-----------|
 | 1 | Spike: Static Hermes AOT — engine-less core module | Milestone ladder M1–M6 below; produces the first core module + FINDINGS.md |
-| 2 | Bootstrap: repo skeleton, host ABI v0, renderer plugin contract | Repo becomes real; canvas2d renderer plugin #1; demo wisp plugin |
+| 2 | Bootstrap: repo skeleton, host ABI v0, renderer plugin contract | Repo becomes real; canvas2d renderer plugin #1; demo plugin (JS-via-shermes or C) |
 | 3 | Desktop host: Wasmtime + sokol renderer plugin | Native rung; sokol_app + sokol_gfx; clay ships an official sokol renderer to crib from |
 | 4 | Spike: any-language wasm plugin bridge (host-mediated) | Foreign wasm module (C/Rust toy) bridged into cordis as an ordinary plugin |
 
@@ -108,8 +116,8 @@ parallel.
 
 ### Spike milestones (ticket #1)
 
-Iterate natively first — the shermes native target is the fast dev loop (it
-plays the role wisc played in wisp2); flip to the wasm target per milestone.
+Iterate natively first — the shermes native target is the fast dev loop;
+flip to the wasm target per milestone.
 
 - **M1 Toolchain**: build static_h (host hermesc, two-stage) + wasm target via
   the documented emscripten path; run `utils/wasm-compile.sh` hello under node
@@ -130,10 +138,13 @@ plays the role wisc played in wisp2); flip to the wasm target per milestone.
   confirmed). Key discovery: static_h defaults to legacy ES5 scoping —
   **`-Xes6-block-scoping` is mandatory** or loop-captured `let`/`const`
   closures share one binding (baked into `compile.sh`; see FINDINGS.md).
-- **M4 wisp runtime + plugin**: AOT both compiled-in and eval-at-runtime;
-  decides plugin model B1 (embedded interpreter, easy authoring, shared heap)
-  vs B2 (each plugin its own AOT wasm module, isolated, uniform with foreign
-  languages). Possibly both coexist.
+- **M4 plugin bridge (model decided — B2)**: prove one real plugin module
+  (shermes-JS and/or C toy) as its own wasm module, host-instantiated and
+  bridged into cordis through a v0 ABI (minimal, grows on demand — solo
+  project). Measure the per-plugin module size first: each shermes-JS
+  module carries its own runtime (~3.2 MB pre-plugin-code at M3 flags);
+  that number drives whether size engineering (-Os, strip, brotli, lazy
+  instantiate) becomes M6 work.
 - **M5 clay + ABI**: clay.c + C ABI dispatcher linked into the same module;
   browser canvas2d host paints the RenderCommandArray via rAF; host-supplied
   text measure (canvas `measureText`); input events flow in.
@@ -149,10 +160,10 @@ plays the role wisc played in wisp2); flip to the wasm target per milestone.
   `-sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=256KB` are the documented flags; the
   cross-build flag is `IMPORT_HOST_COMPILERS`).
 - clay: vendor (submodule or pinned header — decided in ticket #2).
-- wisp2: `~/git/wisp`; plugins compile via `wisc -c` / the wisp2 CLI.
 - cordis: `@deepseek-ai/cordis` — pure ESM, only imports cosmokit; bundle
-  with esbuild `--format=iife --target=es2022` (~69 kB) exactly as the wisp2
-  spike did.
+  with esbuild `--format=iife --target=es2017` (~79 kB with lowering
+  machinery; es2017 lowers async generators, see M2/M3 findings). The same
+  pipeline compiles any JS into a plugin module.
 
 ## Gotchas carried from prior evidence
 
@@ -164,11 +175,10 @@ plays the role wisc played in wisp2); flip to the wasm target per milestone.
 
 - **isConstructor**: cordis classifies any function with a `.prototype` as a
   class and runs `new plugin()`, dropping a *returned* disposer. Use
-  `ctx.effect()` for teardown (or arrow plugins). wisp2's `defplugin` emits
-  arrows and forwards metadata — it will move into eded as a user macro
-  eventually.
+  `ctx.effect()` for teardown (or arrow plugins). The core wraps each
+  bridged plugin as an arrow function, so plugin modules never hit this.
 - **Job queue**: embedded-engine hosts must drain `JS_ExecutePendingJob`
-  (proven in wisp2's driver + now in wisc). Irrelevant for AOT code, but
+  (proven in the wisp2 quickjs spike). Irrelevant for AOT code, but
   applies to every fallback rung that embeds an engine, and to the browser
   host's microtask handling around cordis awaits.
 - **Clay text measure**: clay requires a host-supplied measure function; on
