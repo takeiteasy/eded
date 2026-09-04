@@ -164,7 +164,7 @@ flip to the wasm target per milestone.
   that number drives whether size engineering (-Os, strip, brotli, lazy
   instantiate) becomes M6 work.
   **Done 2026-09-04: GREEN** (12/12 probes, node host rung; browser host
-  prepared, visual run pending). Both plugins proven: shermes-JS (3.16 MB)
+  visually confirmed same day). Both plugins proven: shermes-JS (3.16 MB)
   and freestanding C (241 B) on one WIT-shaped v0 contract — plugin exports
   `plugin_init/plugin_call/plugin_dispose`, core imports routed by handle,
   service names via a host-written scratch buffer, separate memories,

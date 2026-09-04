@@ -457,9 +457,9 @@ only trustworthy native signal, as M2 already concluded.
 - `spike/plugin-bridge/run-m4.sh`: rebuilds C toy, JS plugin, core; runs the
   host harness under node; **GREEN 12/12** (2026-09-04).
 - `core/core-oracle.mjs`: GREEN 8/8 under plain node (cordis semantics pin).
-- **Browser rung prepared, not yet run** (SSH session): serve
-  `spike/plugin-bridge/` over http and open `index.html` — same probes,
-  verdict on page and console, `onunhandledrejection` hooked per M2.
+- **Browser rung: GREEN, visually confirmed 2026-09-04** (served locally,
+  opened in Chromium; verdict GREEN on page and console, `onunhandledrejection`
+  hooked per M2). All three rungs of the spike are green.
 
 ### Carried to M5
 
