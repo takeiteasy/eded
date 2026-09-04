@@ -1,0 +1,10 @@
+{
+  "name": "eded-core-bridge",
+  "private": true,
+  "type": "commonjs",
+  "description": "M4 core module: cordis + v0 plugin bridge (spike)",
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "esbuild": "0.25.12"
+  }
+}

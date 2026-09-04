@@ -10,4 +10,7 @@ spike/**/*-wasm.js
 spike/**/*-wasm.wasm
 spike/**/suite-bundle.js
 spike/**/cordis-bundle.js
+spike/**/core-bundle.js
+spike/**/toy.wasm
+!spike/plugin-bridge/toy.c
 /suite-bundle*

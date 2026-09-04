@@ -83,6 +83,13 @@ Design invariants:
    module carries its own runtime (~3.2 MB before plugin code); measure at
    M4 before deciding whether size engineering (-Os, strip, brotli, lazy
    instantiate) lands in M6 scope.
+5b. **The plugin ABI is WIT-shaped but hand-rolled until it pays for
+   itself.** The v0 contract (M4) maps 1:1 onto a future `eded:plugin`
+   WIT package — sync calls, integer params, s32 results — so adoption
+   later is a formalization step, not a redesign. Adopt for real when the
+   desktop host (ticket #3, Wasmtime's native component support) or a
+   second author makes generated bindings worth the toolchain; the browser
+   rung has no native component story and would pay a transpiled-glue tax.
 
 ## Why Static Hermes AOT (and the fallback ladder)
 
@@ -156,6 +163,15 @@ flip to the wasm target per milestone.
   module carries its own runtime (~3.2 MB pre-plugin-code at M3 flags);
   that number drives whether size engineering (-Os, strip, brotli, lazy
   instantiate) becomes M6 work.
+  **Done 2026-09-04: GREEN** (12/12 probes, node host rung; browser host
+  prepared, visual run pending). Both plugins proven: shermes-JS (3.16 MB)
+  and freestanding C (241 B) on one WIT-shaped v0 contract — plugin exports
+  `plugin_init/plugin_call/plugin_dispose`, core imports routed by handle,
+  service names via a host-written scratch buffer, separate memories,
+  arrow-wrapped cordis plugins, teardown routed to `plugin_dispose`. Key
+  mechanism: `_sh_get_hermes_runtime` (full JSI) as the shim API, with
+  `drainMicrotasks()` after each core entry point. Size engineering is
+  confirmed M6 work. See FINDINGS.md.
 - **M5 clay + ABI**: clay.c linked in-core and wrapped as the `layout`
   cordis service; browser canvas2d host paints the RenderCommandArray via
   rAF; host-supplied text measure (canvas `measureText`); input events flow
@@ -188,6 +204,18 @@ flip to the wasm target per milestone.
   (final value wins) without it — interpreter, native and wasm alike. Baked
   into `spike/shermes-aot/compile.sh`; re-verify with
   `spike/cordis-aot/probe-loop-scoping.js` after any hermes pin bump.
+
+- **`shermes -emit-c` writes the generated `<basename>.c` to the current
+  working directory**, not next to the input — bare manual invocations
+  produce strays while stale files sit next to the input (this cost M4 a
+  misdiagnosis of `-exported-unit`, which in fact works at pin `5cee10a`:
+  it renames the unit export and suppresses `main`). Pipeline scripts must
+  `cd` first; eded's all do (see FINDINGS.md M4).
+
+- **`_sh_get_hermes_runtime(shr)` is the shim API**: every SHRuntime exposes
+  a full JSI runtime (host functions via `createFromHostFunction`, C→JS via
+  `getPropertyAsFunction().call`, `drainMicrotasks()` for the job queue).
+  Prefer it over raw SH frame conventions; FINDINGS.md M4 records both.
 
 - **isConstructor**: cordis classifies any function with a `.prototype` as a
   class and runs `new plugin()`, dropping a *returned* disposer. Use

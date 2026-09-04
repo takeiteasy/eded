@@ -1,0 +1,182 @@
+<!doctype html>
+<!-- M4 browser host (deferred verification rung — the node rung is GREEN).
+     Serve spike/plugin-bridge/ over http and open this file; the wasm must be
+     served with content-type application/wasm (emscripten glue enforces).
+     Same logic as host.mjs; same probe contract; verdict printed to console
+     and page. Uses namespaced globals (M1 gotcha: the minified glue owns
+     top-level `var out`/`var err` etc. — never collide). -->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>eded M4 — plugin bridge (browser host)</title>
+  <style>
+    body { font-family: ui-monospace, monospace; background: #111; color: #ddd; padding: 1.5rem; }
+    #m4-verdict { font-size: 1.4rem; margin-top: 1rem; }
+    .pass { color: #6c6; } .fail { color: #d66; }
+    pre { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>eded M4 — plugin bridge</h1>
+  <pre id="m4-log"></pre>
+  <div id="m4-verdict">running…</div>
+
+  <script src="core/core-wasm.js"></script>
+  <script src="plugin-counter-wasm.js"></script>
+  <script>
+  window.addEventListener("unhandledrejection", (e) => {
+    console.error("unhandledrejection:", e.reason);
+    const el = document.getElementById("m4-verdict");
+    if (el) { el.textContent += "  [unhandled rejection: " + e.reason + "]"; el.className = "fail"; }
+  });
+  window.addEventListener("error", (e) => console.error("error:", e.message));
+  (async function () {
+    const m4log = document.getElementById("m4-log");
+    const m4verdict = document.getElementById("m4-verdict");
+    let m4fails = 0, m4total = 0;
+    function m4check(name, ok, detail) {
+      m4total++;
+      const line = (ok ? "PASS " : "FAIL ") + name + (ok ? "" : " - " + detail);
+      const span = document.createElement("span");
+      span.className = ok ? "pass" : "fail";
+      span.textContent = line + "\n";
+      m4log.appendChild(span);
+      console.log(line);
+      if (!ok) m4fails++;
+    }
+
+    // host bridge state (namespaced)
+    const ededPlugins = new Map();
+    let ededNextHandle = 1;
+    const ededBridgeTrace = [];
+    globalThis.__ededHost = {
+      pluginCall(handle, fn, a, b) {
+        const p = ededPlugins.get(handle);
+        ededBridgeTrace.push("call:" + (p ? p.label : handle) + ":" + fn);
+        if (!p) return -97;
+        return p.call(fn, a, b);
+      },
+      pluginDispose(handle) {
+        const p = ededPlugins.get(handle);
+        ededBridgeTrace.push("dispose:" + (p ? p.label : handle));
+        if (!p) return -97;
+        const r = p.dispose();
+        ededPlugins.delete(handle);
+        return r;
+      },
+    };
+
+    async function ededLoadCore() {
+      const core = await createCore();
+      return core;
+    }
+    async function ededLoadJsPlugin(label) {
+      const m = await createPluginModule();
+      const handle = ededNextHandle++;
+      ededPlugins.set(handle, {
+        label,
+        call: (fn, a, b) => m._plugin_call(fn, a, b),
+        dispose: () => m._plugin_dispose(),
+      });
+      m._plugin_init();
+      return handle;
+    }
+    async function ededLoadCPlugin(label) {
+      const bytes = await fetch("toy.wasm").then((r) => r.arrayBuffer());
+      const { instance } = await WebAssembly.instantiate(bytes, {});
+      const handle = ededNextHandle++;
+      ededPlugins.set(handle, {
+        label,
+        call: (fn, a, b) => instance.exports.plugin_call(fn, a, b),
+        dispose: () => instance.exports.plugin_dispose(),
+      });
+      instance.exports.plugin_init();
+      return handle;
+    }
+    function ededCoreLoad(core, handle, name) {
+      const bytes = new TextEncoder().encode(name);
+      core.HEAPU8.set(bytes, core._core_name_ptr());
+      core._core_name_len_set(bytes.length);
+      return core._core_load_plugin(handle);
+    }
+
+    try {
+      const core = await ededLoadCore();
+      m4check("p0-core-init", core._core_init() === 0, "core_init failed");
+
+      // p1: JS plugin round-trip
+      {
+        const h = await ededLoadJsPlugin("js-counter");
+        m4check("p1-load", ededCoreLoad(core, h, "counter") === 0, "load rc");
+        const v = core._core_call_service(0, 20, 22);
+        m4check("p1-roundtrip", v === 42, "got " + v);
+      }
+      // p2: C toy plugin
+      {
+        const h = await ededLoadCPlugin("c-toy");
+        m4check("p2-load", ededCoreLoad(core, h, "toy") === 0, "load rc");
+        const v = core._core_call_service(1, 6, 7);
+        m4check("p2-roundtrip", v === 42, "got " + v);
+      }
+      // p3: dispose routing
+      {
+        const before = ededBridgeTrace.length;
+        const h = await ededLoadCPlugin("c-toy-2");
+        ededCoreLoad(core, h, "shortlived");
+        core._core_call_service(0, 1, 2);
+        const rc = core._core_unload_plugin(h);
+        const disposed = ededBridgeTrace.slice(before).some((t) => t.startsWith("dispose:c-toy-2"));
+        m4check("p3-unload-rc", rc === 0, "rc=" + rc);
+        m4check("p3-dispose-routed", disposed, "no dispose in trace");
+      }
+      // p3b: service gone
+      {
+        const h = await ededLoadCPlugin("c-toy-3");
+        ededCoreLoad(core, h, "ephemeral");
+        const present = core._core_call_service(0, 5, 5);
+        core._core_unload_plugin(h);
+        const miss = core._core_call_service(0, 5, 5);
+        m4check("p3b-present", present === 10, "got " + present);
+        m4check("p3b-miss-after-unload", miss === -96, "got " + miss);
+      }
+      // p4: sync round trip
+      {
+        const h = await ededLoadJsPlugin("js-counter-2");
+        ededCoreLoad(core, h, "counter2");
+        const before = ededBridgeTrace.length;
+        const v = core._core_call_service(0, 20, 22);
+        m4check("p4-sync-roundtrip",
+          v === 42 && ededBridgeTrace.length === before + 1, "v=" + v);
+      }
+      // p5: double-instantiate isolation
+      {
+        const ha = await ededLoadJsPlugin("js-inst-a");
+        const hb = await ededLoadJsPlugin("js-inst-b");
+        ededCoreLoad(core, ha, "inst-a");
+        ededCoreLoad(core, hb, "inst-b");
+        const nameSet = (n) => {
+          const b = new TextEncoder().encode(n);
+          core.HEAPU8.set(b, core._core_name_ptr());
+          core._core_name_len_set(b.length);
+        };
+        nameSet("inst-a");
+        const va1 = core._core_call_service(3, 99, 0);
+        const va2 = core._core_call_service(2, 0, 0);
+        nameSet("inst-b");
+        const vb1 = core._core_call_service(2, 0, 0);
+        m4check("p5-isolated-state", va1 === 0 && va2 === 99 && vb1 === 0,
+          `a.set=${va1} a.get=${va2} b.get=${vb1}`);
+      }
+    } catch (e) {
+      m4check("host-exception", false, String((e && e.stack) || e));
+    }
+
+    const verdict = m4fails ? "RED (" + m4fails + ")" : "GREEN";
+    m4verdict.textContent = "VERDICT: " + verdict + "  (" + (m4total - m4fails) + "/" + m4total + " probes)";
+    m4verdict.className = m4fails ? "fail" : "pass";
+    console.log("RESULT: " + (m4total - m4fails) + "/" + m4total);
+    console.log("VERDICT: " + verdict);
+  })();
+  </script>
+</body>
+</html>

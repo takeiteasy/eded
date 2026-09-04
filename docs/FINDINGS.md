@@ -324,3 +324,151 @@ only trustworthy native signal, as M2 already concluded.
   knowledge of it.
 - Keep `probe-loop-scoping.js` in the re-verification checklist for any
   hermes pin bump.
+
+## M4 — plugin bridge (2026-09-04) : GREEN (node host rung; browser prepared)
+
+### What was built
+
+- `spike/plugin-bridge/` — the host-mediated bridge spike (M4 = ticket #4's
+  scope, executed under ticket #1 per the M4 re-point). A **plugin is a wasm
+  module**: the host instantiates it, keeps a `handle → instance` table, and
+  routes calls between it and the in-core cordis.
+- **v0 plugin contract** (sync, integers, negative = error; WIT-transcribable
+  by design — see Decisions):
+  - plugin module exports: `plugin_init() -> i32`,
+    `plugin_call(fn, a, b) -> i32`, `plugin_dispose() -> i32`
+  - core exports (host calls): `core_init`, `core_load_plugin(handle)`,
+    `core_unload_plugin(handle)`, `core_call_service(fn, a, b)` (spike
+    consumer surface), `core_name_ptr` + `core_name_len_set` (scratch buffer)
+  - core imports (host-implemented, routed by handle):
+    `host_plugin_call(handle, fn, a, b) -> i32`,
+    `host_plugin_dispose(handle) -> i32`
+- Two plugin modules on the same contract:
+  - `plugin-counter.js` — shermes-JS toy, compiled by
+    `compile-plugin.sh` (the M3 pipeline + `js-plugin.cpp` shim). The plugin
+    JS registers `eded_init`/`eded_call`/`eded_dispose` on globalThis at
+    unit-init; the shim forwards the wasm exports to them.
+  - `toy.c` — pure freestanding C (`clang --target=wasm32 -nostdlib
+    --no-entry`), **241 bytes**, no runtime, no imports.
+- `core/` — the core module: real cordis 4.0.2 + bridge glue (`core-entry.js`)
+  AOT-compiled and linked with `core-shim.cpp`. Each bridged plugin is wrapped
+  as an **arrow-function** cordis plugin (isConstructor-safe, M3 p6) whose
+  body `local.provide(name, {call})` routes through the bridge, with an
+  `effect()` disposer calling `plugin_dispose` via the host. A node oracle
+  (`core/core-oracle.mjs`, 8/8) pinned the cordis semantics the bridge relies
+  on BEFORE AOT: provide-from-plugin-body is visible to outside inject; fiber
+  start is a microtask (not synchronous with `ctx.plugin()`); after
+  `fiber.dispose()` a fresh inject of the name defers again; arrow wrappers
+  tear down via `ctx.effect` normally.
+- `host.mjs` — the host harness (node rung): instantiates core + plugins,
+  owns the bridge table (`globalThis.__ededHost`), runs the probe suite.
+  `index.html` — browser twin of the same logic (verdict on page + console).
+
+### Key discoveries
+
+1. **The JSI escape hatch is the real shim API.** `_sh_get_hermes_runtime(shr)`
+   returns a full `facebook::hermes::HermesRuntime` (jsi::Runtime) for the SH
+   runtime — the same mechanism the console bindings use. With it, shims are
+   plain JSI: `global().setProperty` + `Function::createFromHostFunction` for
+   the JS→C direction (core imports), `getPropertyAsFunction(...).call(...)`
+   for C→JS, `String::createFromUtf8` for strings, `drainMicrotasks()` for
+   the job queue. No raw frame poking needed. (The raw SH convention is
+   decoded below for the record.)
+2. **SH C→JS calling convention** (decoded from SH.cpp codegen, for cases
+   where JSI is unavailable): the caller pushes a 12-register outgoing
+   region; `frame[5]`=callee, `frame[4]`=this, `frame[6]`=newTarget, args
+   DESCEND from `frame[3]` (arg0=[3], arg1=[2], arg2=[1]; per
+   `_sh_stackframe_get_arg_ptr(frame, n) = &ThisArg_ptr(frame)[-n-1]`), then
+   `_sh_ljs_call(shr, frame, argc)`.
+3. **`-exported-unit=NAME` works at pin `5cee10a`** — it applies
+   `#define CREATE_THIS_UNIT sh_export_NAME` to the generated C and
+   suppresses `main`. The plugin pipeline uses it
+   (`sh_export_eded_plugin()` + lazy `_sh_init`/`_sh_initialize_units` from
+   `plugin_init`). The process gotcha that cost time: `shermes -emit-c`
+   writes the generated `<basename>.c` to the **current working directory**,
+   not next to the input — bare manual invocations silently produce strays
+   while stale files from earlier pipeline runs sit next to the input, and
+   every check of "the" generated file reads the stale one. Pipeline scripts
+   must `cd` to the target dir first (all of eded's do); re-verify the flag
+   on hermes pin bumps.
+4. **Microtask draining without the console event loop**: cordis fiber start
+   and dispose completion are microtasks, and SH keeps its own queue (node's
+   loop can't touch it). `hrt.drainMicrotasks()` drains it; the core shim
+   drains after every entry point, so hosts observe effects synchronously on
+   return (`run_event_loop` was rejected — it blocks waiting for tasks).
+5. **cordis inject-miss + reactivity make the bridge honest**: a consumer
+   registered before the service exists stays deferred; provide-from-plugin
+   fires it; unload makes fresh injects defer again (p3b). No polling, no
+   special cases — cordis's own semantics do the work.
+6. Emscripten glue details that cost time: MODULARIZE glues (`-sMODULARIZE=1
+   -sEXPORT_NAME=...`) are required for a usable host-side factory (the
+   minified non-modularized glue exports nothing); emscripten 6 needs
+   `-sEXPORTED_RUNTIME_METHODS=HEAPU8` for host→core memory writes; mixed
+   C/C++ sources need separate `emcc -c` steps (`-std=c++17` poisons .c
+   inputs); the modules import from a minified namespace (`"a"`) so they must
+   always be instantiated through their glue, not bare
+   `WebAssembly.instantiate` (which also demands an imports argument under
+   node); hermes public headers need `-I API -I API/jsi -I public`.
+
+### Decisions (2026-09-04)
+
+- **WIT-shaped, hand-rolled v0; adoption deferred.** The v0 ABI is
+  transcribable 1:1 onto a future `eded:plugin@0.1.0` WIT package (sync
+  calls, integer params, s32 results). WIT/component-model adoption is
+  re-pointed to ticket #3 (Wasmtime implements components natively) or
+  whenever a second author/plugin ecosystem appears. Rejected for now: the
+  browser has no native component support (transpiled-glue tax) and our
+  shermes shim work remains regardless.
+- **i32-only returns** (deviation from the sketched two-i32/multi-value
+  return): hand-written C cannot emit multi-value returns, and BigInt under
+  shermes is unproven. A WIT `call: func(...) -> s32` expresses the same
+  shape; richer result types are ABI growth.
+- **Separate memories, host-mediated routing.** Plugins never see each
+  other's memory; the host is the only intermediary (proven by p5's
+  independent instances). Shared memory rejected (nonstandard, breaks
+  Wasmtime, defeats isolation).
+- **Name via scratch-buffer copy**: the host writes the service-name bytes
+  into core memory (`core_name_ptr` + HEAPU8 + `core_name_len_set`), proving
+  the host→core copy pattern M5 will generalize. The core reads it back as a
+  JSI string (`core_pending_name`).
+- **Error channel is contract-level** (negative i32), not exception-level:
+  emscripten links noexcept libc++, so C++ exceptions across the JSI boundary
+  would abort. JS handlers must be total functions in v0; a real error
+  channel is ABI growth (alongside an unload-completion callback, since
+  `fiber.dispose()` completion is async while the export must return sync).
+
+### Numbers (M4)
+
+- core module (cordis + bridge + shim): **3.83 MB** (-O3, unstripped; M3's
+  cordis-only suite was 4.0 MB — the probe suite outweighed the bridge).
+- shermes-JS plugin: **3.16 MB** with `--no-entry` (3.2 MB via the M3-style
+  glue) — the per-plugin runtime floor stands; plugin code adds ~nothing.
+- C toy plugin: **241 bytes**. The 3.16 MB vs 241 B contrast is the M6 size
+  lever: every shermes-JS plugin carries a full VM, so size engineering
+  (-Os/strip/brotli, and dropping the core's idle interpreter) is confirmed
+  as M6 work.
+- Probe suite: 12/12 under the node host rung (p0 init; p1 JS round-trip
+  add(20,22)=42; p2 C toy mul(6,7)=42; p3 unload→dispose routed; p3b inject
+  defers after unload; p4 full round trip synchronous in one host call; p5
+  two instances of one module with isolated state).
+
+### Verification
+
+- `spike/plugin-bridge/run-m4.sh`: rebuilds C toy, JS plugin, core; runs the
+  host harness under node; **GREEN 12/12** (2026-09-04).
+- `core/core-oracle.mjs`: GREEN 8/8 under plain node (cordis semantics pin).
+- **Browser rung prepared, not yet run** (SSH session): serve
+  `spike/plugin-bridge/` over http and open `index.html` — same probes,
+  verdict on page and console, `onunhandledrejection` hooked per M2.
+
+### Carried to M5
+
+- The **UI-declaration contract** remains the key open design question (per
+  plan.md): how plugins get UI on screen — per-frame immediate clay calls
+  across the ABI, batched element-fragment buffers, or a panels service.
+  The v0 call-routing proven here is the substrate whichever wins.
+- ABI growth queue (in demand order, per "grows on demand"): string/bytes
+  parameters (generalize the scratch buffer), an unload-completion callback,
+  a real error channel, plugin-side inject (deps declared across the bridge).
+- Numbers to re-take at M6: instantiate cost per JS plugin module (memory as
+  well as bytes — each carries its own heap), and stripped/-Os sizes.
