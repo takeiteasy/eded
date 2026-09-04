@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>eded M3 cordis AOT (wasm)</title>
+</head>
+<body>
+<h3>eded M3 — real cordis lifecycle under shermes AOT wasm</h3>
+<p>Expected: six PASS lines, six <code>RESULT ...: 0 failed</code>, then
+<code>VERDICT: GREEN</code>.</p>
+<pre id="eded-out"></pre>
+<script>
+// namespaced on purpose: the emscripten glue owns top-level var out/err
+var ededOut = document.getElementById("eded-out");
+function ededAppend(prefix, args) {
+  var line = prefix + ": " + Array.prototype.map.call(args, function (a) {
+    try { return String(a); } catch (e) { return "[unstringable]"; }
+  }).join(" ");
+  ededOut.textContent += line + "\n";
+}
+function ededLog() { ededAppend("log", arguments); }
+function ededErr() { ededAppend("err", arguments); }
+window.onerror = function (msg, src, line, col) {
+  ededErr("onerror " + msg + " @ " + (src || "?") + ":" + line + ":" + col);
+};
+window.onunhandledrejection = function (ev) {
+  ededErr("unhandledrejection " + (ev.reason && (ev.reason.stack || ev.reason.message) || String(ev.reason)));
+};
+fetch("cordis-bundle-wasm.wasm", { method: "HEAD" }).then(function (r) {
+  ededLog("wasm fetch: " + r.status + " content-type=" + r.headers.get("content-type"));
+});
+</script>
+<script src="cordis-bundle-wasm.js"></script>
+<script>
+window.addEventListener("load", function () {
+  ededLog("html: load event fired");
+  if (ededOut.textContent.indexOf("VERDICT: GREEN") === -1 &&
+      ededOut.textContent.indexOf("VERDICT") !== -1) {
+    ededErr("verdict line seen but not GREEN");
+  }
+});
+</script>
+</body>
+</html>

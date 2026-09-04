@@ -126,6 +126,10 @@ plays the role wisc played in wisp2); flip to the wasm target per milestone.
 - **M3 cordis AOT end to end**: esbuild IIFE (`--target=es2017` to lower
   async generators; see M2 findings) -> hermesc -> C/link -> wasm;
   lifecycle test (provide / inject / effect / dispose) under a wasm runtime.
+  **Done 2026-09-04: GREEN** (native + wasm under node + browser, visually
+  confirmed). Key discovery: static_h defaults to legacy ES5 scoping —
+  **`-Xes6-block-scoping` is mandatory** or loop-captured `let`/`const`
+  closures share one binding (baked into `compile.sh`; see FINDINGS.md).
 - **M4 wisp runtime + plugin**: AOT both compiled-in and eval-at-runtime;
   decides plugin model B1 (embedded interpreter, easy authoring, shared heap)
   vs B2 (each plugin its own AOT wasm module, isolated, uniform with foreign
@@ -151,6 +155,12 @@ plays the role wisc played in wisp2); flip to the wasm target per milestone.
   spike did.
 
 ## Gotchas carried from prior evidence
+
+- **static_h needs `-Xes6-block-scoping`**: legacy ES5 scoping is the
+  default; loop-captured `let`/`const` closures silently share one binding
+  (final value wins) without it — interpreter, native and wasm alike. Baked
+  into `spike/shermes-aot/compile.sh`; re-verify with
+  `spike/cordis-aot/probe-loop-scoping.js` after any hermes pin bump.
 
 - **isConstructor**: cordis classifies any function with a `.prototype` as a
   class and runs `new plugin()`, dropping a *returned* disposer. Use

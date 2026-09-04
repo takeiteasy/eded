@@ -1,0 +1,13 @@
+{
+  "name": "cordis-aot",
+  "version": "0.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "M3: real cordis AOT end to end (esbuild -> hermesc -> C/link -> wasm)",
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

@@ -9,4 +9,5 @@ spike/**/*.o
 spike/**/*-wasm.js
 spike/**/*-wasm.wasm
 spike/**/suite-bundle.js
+spike/**/cordis-bundle.js
 /suite-bundle*

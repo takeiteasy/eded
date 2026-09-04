@@ -208,3 +208,113 @@ async/await, custom thenables and Promise combinators are all green.
   module ever needs multiple sources.
 - `isConstructor` heuristic (`.prototype` + GeneratorFunction exclusion)
   proven — wisp2's `defplugin` arrow-plugin guidance stands.
+
+## M3 — cordis AOT end to end (2026-09-04) : GREEN (one pipeline-level discovery)
+
+### What was built
+
+- `spike/cordis-aot/` — real `@deepseek-ai/cordis@4.0.2` (exact pin, plus
+  cosmokit transitively) compiled AOT and driven through a full lifecycle
+  suite. Own `package.json` pins `esbuild@0.25.12`; `type: commonjs`
+  deliberately — the emscripten glue is CJS and node loads `*-wasm.js`
+  directly (ESM package type breaks it; the harness is `lifecycle.mjs`).
+- `lifecycle.mjs` — 6 probes over real cordis, M2 output contract
+  (`PASS|FAIL`, `RESULT`, `VERDICT`, exit code = failures):
+  p1 provide/inject across `extend()` + inject-miss deferral, p2 real
+  `Service` subclass (callable through `ctx.counter` + inject), p3 sync
+  effect + teardown-on-unload, p4 async body/async disposer ordering, p5
+  plugin with `inject` deps (not started before provide, start → dispose
+  ordering), p6 `isConstructor` pitfall (named function + `.prototype`
+  drops returned disposer; `ctx.effect` teardown still runs).
+- `bundle.sh` — `esbuild lifecycle.mjs --bundle --format=iife
+  --target=es2017 --platform=neutral` + asserts (no `async function*`
+  survives; `__asyncGenerator` helper present) + bare-bundle node run.
+- `run-m3.sh` — one command: bundle → AOT wasm → node, then native shermes.
+- `probe-loop-scoping.js` — permanent semantics probe for the discovery
+  below; re-run after any hermes re-pin or toolchain change.
+- `index.html` — browser host (namespaced ids, `onerror` +
+  `onunhandledrejection`, verdict check).
+
+### THE discovery: `-Xes6-block-scoping` is mandatory
+
+Cordis under the M2 pipeline (no extra flags) failed natively with
+`invalid plugin, expect function or object with an "apply" method` and
+`Object is not a function` in the fiber apply path — while node ran the
+identical bundle green. Bisect chain (instrumented bundle → pure-shermes
+probes): `ctx.inject(["a"], cb)` reached `registry.plugin()` with the **deps
+array** as the plugin argument. Root cause far below cordis:
+
+> **static_h compiles legacy ES5 scoping by default. Closures capturing
+> loop-scoped `let`/`const` share ONE binding across iterations — every
+> closure sees the final value.** Broken for `for (let i …)` (arrow AND
+> function-expression capture), `for…of`/`for…in` (destructuring or not),
+> `while` with an inner `const`, and under the interpreter (`hermes -exec`)
+> as well as native/wasm AOT — it is the shared frontend, not the AOT
+> backend. `var` semantics (share) are correct; non-loop closures are
+> correct. Spec violation, silent, no warning.
+
+Fix: **`-Xes6-block-scoping`** (undocumented — absent from `shermes -help`,
+referenced only by old HBC-era lit tests like `test/IRGen/es6/
+for-let-tdz.js`) restores spec-correct per-iteration environments on all
+rungs. Not a hermes bug to report — a default-off scoping mode.
+
+Consequences:
+
+- cordis's `ReflectService.mixin()` wires `ctx.inject`/`ctx.plugin` via
+  accessors created in a `for (const [key, value] of …)` loop inside a
+  generator — with legacy scoping every accessor captured the last key, so
+  `ctx.inject` returned `ctx.plugin`. The ES2017-lowered bundle preserved
+  the pattern (esbuild keeps `for…of`/shorthands; only async generators and
+  newer syntax lower), which is why M2's hand-written probes never saw it:
+  **M2's 11 probes contained zero loop-variable captures.** The M2 GREEN
+  verdict stands for what it tested, but was blind to this class.
+- `spike/shermes-aot/compile.sh` now owns the whole pipeline (upstream
+  `utils/wasm-compile.sh` hardcodes shermes flags and can't take the flag)
+  and bakes in `-Xenable-tdz -Xes6-block-scoping`. M2 suite re-run under the
+  new pipeline: still GREEN 11/11.
+- Any M4+ wisp-compiled plugin code with closures in loops needs the same
+  flag — it is in the shared `compile.sh`, so all rungs inherit it.
+
+Debugging notes worth keeping: `JSON.stringify` silently omits function
+values — it "hid" the `apply` property mid-bisect and nearly misdirected to
+a property-dropping bug; instrument with `typeof` + `Object.keys`, not
+JSON. Native shermes has no `quit()` (`typeof quit === "function"` guards
+it; exit codes only work under wasm/node glue) — RESULT lines remain the
+only trustworthy native signal, as M2 already concluded.
+
+### Verification
+
+- `run-m3.sh`: **GREEN on all four rungs** — node oracle (uncompiled ESM),
+  es2017 IIFE bundle under node, wasm AOT under node (exit 0), native
+  `shermes -exec`, and the browser host (visually confirmed 2026-09-04:
+  six PASS/RESULT lines + `VERDICT: GREEN`, wasm served with
+  content-type `application/wasm`). Zero semantic divergences between the
+  AOT module and node 26 on the full lifecycle surface.
+- `AsyncGeneratorFunction` after es2017 lowering resolves to
+  `GeneratorFunction` (the `__asyncGenerator` wrapper is a sync generator
+  function). cordis's `isConstructor` generator exclusion therefore widens
+  to cover sync generators too — self-consistent within the bundle
+  (nothing in it is a native async generator anymore) and harmless:
+  generator functions were never plugin-shaped. Recorded, not fixed.
+
+### Numbers (M3)
+
+- cordis-bundle.js (es2017 IIFE, cordis + cosmokit + harness): **79.4 kB**
+  (raw cordis ESM reference: 69 kB; ~10 kB is the async-generator lowering
+  machinery).
+- `cordis-bundle-wasm.wasm`: **4.0 MB** `-O3` unstripped (M1 hello 3.2 MB →
+  +0.8 MB for full cordis + suite).
+- `repro-loop-matrix-wasm.wasm`: 3.2 MB (matrix probe alone, bare runtime).
+- esbuild bundle: ~11 ms; hermesc → C → emcc → wasm: seconds.
+
+### Carried to M4
+
+- Plugin model decision (B1 embedded interpreter vs B2 per-plugin AOT wasm)
+  now has a data point: the AOT path needs `-Xes6-block-scoping` everywhere
+  JS is compiled (core AND plugins); B1's eval path must ensure the
+  interpreter gets equivalent scoping (verify `hermes` interpreter defaults
+  or flags before M4).
+- Keep `probe-loop-scoping.js` in the re-verification checklist for any
+  hermes pin bump.
+- wisp2's emitter should avoid relying on per-iteration loop bindings until
+  the eded pipeline guarantees the flag (it does via compile.sh).
