@@ -36,7 +36,8 @@ future, so the plugin ABI starts minimal and grows on demand.
                       |  render-commands / load-plugin
 +---------------------v---------------------------------------------+
 |                    EDED CORE — one wasm module                    |
-|  clay (layout, C) + C ABI dispatcher                              |
+|  clay (layout, C) wrapped as the `layout` cordis service           |
+|  C ABI dispatcher                                                  |
 |  AOT-compiled cordis (no JS engine inside)                        |
 |  plugins: separate wasm modules, host-instantiated + bridged      |
 |    (any producer: C, Rust, JS via shermes, ...)                   |
@@ -48,6 +49,16 @@ Design invariants:
 
 1. **Renderers own no layout.** They consume render commands and push input.
    The core never sees a window, GPU or canvas.
+1b. **Layout is an in-core cordis service, not a remote module.** clay is
+   wrapped as the injectable `layout` service so the "everything is a
+   plugin" philosophy holds where it matters (lifecycle, injection,
+   replacement) without putting the frame path behind module hops. The
+   harness's tui/webui lesson is about presentation — honored by renderer
+   plugins — not about layout, which is the shared substrate every plugin's
+   UI must compose into. Revisit trigger: if a second layout engine becomes
+   real or plugin UI outgrows clay's model, the element vocabulary moves
+   into the ABI and clay can move out freely; until then, abstracting it
+   is speculative generality for exactly one layout engine.
 1a. **The core module is single-threaded.** Finalizers that upstream defers
    to a worker thread run inline instead (see
    `patches/hermes-serial-executor-singlethread.patch`). Emscripten pthreads
@@ -145,9 +156,14 @@ flip to the wasm target per milestone.
   module carries its own runtime (~3.2 MB pre-plugin-code at M3 flags);
   that number drives whether size engineering (-Os, strip, brotli, lazy
   instantiate) becomes M6 work.
-- **M5 clay + ABI**: clay.c + C ABI dispatcher linked into the same module;
-  browser canvas2d host paints the RenderCommandArray via rAF; host-supplied
-  text measure (canvas `measureText`); input events flow in.
+- **M5 clay + ABI**: clay.c linked in-core and wrapped as the `layout`
+  cordis service; browser canvas2d host paints the RenderCommandArray via
+  rAF; host-supplied text measure (canvas `measureText`); input events flow
+  in. Carries the key open design question of the UI era: the
+  **UI-declaration contract** — how plugins get UI on screen (per-frame
+  immediate clay calls across the ABI, batched element-fragment buffers, or
+  a high-level panels service à la Koishi's console). Shapes the plugin ABI
+  far more than clay's address; freeze only when a real plugin needs UI.
 - **M6 numbers**: module size, cold start, per-frame cost; FINDINGS.md.
 
 ## Toolchain prereqs
