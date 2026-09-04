@@ -9,3 +9,4 @@ spike/**/*.o
 spike/**/*-wasm.js
 spike/**/*-wasm.wasm
 spike/**/suite-bundle.js
+/suite-bundle*
