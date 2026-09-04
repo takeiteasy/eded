@@ -1,0 +1,27 @@
+diff --git a/lib/Support/SerialExecutor.cpp b/lib/Support/SerialExecutor.cpp
+index 5132823..e248dc3 100644
+--- a/lib/Support/SerialExecutor.cpp
++++ b/lib/Support/SerialExecutor.cpp
+@@ -32,6 +32,14 @@ SerialExecutor::~SerialExecutor() {
+ }
+ 
+ void SerialExecutor::add(llvh::unique_function<void()> task) {
++#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
++  // Single-threaded emscripten (built without pthreads): there is no worker
++  // thread to defer to, so run the task synchronously on the calling thread.
++  // Finalizers, the main user of this executor, are small and re-entrancy
++  // safe: a task whose destructor calls add() runs the nested task inline.
++  // threadState_ stays Uninitialized, so ~SerialExecutor skips the join.
++  task();
++#else
+   std::unique_lock<std::mutex> lock(mutex_);
+   // Draining inside ~SerialExecutor destroys tasks, and a task's captured
+   // state may enqueue more work from its destructor. That is fine: the drain
+@@ -90,6 +98,7 @@ void SerialExecutor::add(llvh::unique_function<void()> task) {
+   // run, destroying it on the calling thread instead of the worker.
+   tasks_.push_back(std::move(task));
+   wakeUpSig_.notify_one();
++#endif
+ }
+ 
+ void SerialExecutor::run() {

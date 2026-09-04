@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- M1 browser host: runs the AOT hello module. Mirrors console output and
+     every failure point into the DOM so headless or manual verification can
+     see exactly how far the boot got. Identifiers are prefixed to avoid
+     colliding with the minified emscripten glue (it declares var out, var err,
+     etc. at top level). -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>eded M1 — shermes AOT hello</title>
+  </head>
+  <body>
+    <pre id="eded-out"></pre>
+    <script>
+      const ededOut = document.getElementById("eded-out");
+      const ededAppend = (s) => { ededOut.textContent += s + "\n"; };
+
+      ededAppend("html: host script running");
+
+      window.onerror = (msg, src, line, col) => {
+        ededAppend(`onerror: ${msg} @ ${src}:${line}:${col}`);
+      };
+      window.onunhandledrejection = (e) => {
+        ededAppend("unhandledrejection: " + (e.reason && e.reason.stack || e.reason));
+      };
+
+      const ededLog = console.log.bind(console);
+      const ededErr = console.error.bind(console);
+      console.log = (...args) => { ededLog(...args); ededAppend("log: " + args.join(" ")); };
+      console.error = (...args) => { ededErr(...args); ededAppend("err: " + args.join(" ")); };
+
+      // Emscripten glue picks this up (defined before the glue script loads).
+      var Module = {
+        print: (text) => ededAppend("print: " + text),
+        printErr: (text) => ededAppend("printErr: " + text),
+        onAbort: (what) => ededAppend("onAbort: " + what),
+      };
+
+      fetch("hello-wasm.wasm")
+        .then((r) => ededAppend(`wasm fetch: ${r.status} content-type=${r.headers.get("content-type")}`))
+        .catch((e) => ededAppend("wasm fetch failed: " + e));
+
+      window.addEventListener("load", () => ededAppend("html: load event fired"));
+    </script>
+    <script src="hello-wasm.js"></script>
+  </body>
+</html>
