@@ -2,3 +2,6 @@
 	path = vendor/hermes
 	url = https://github.com/facebook/hermes
 	branch = static_h
+[submodule "vendor/clay"]
+	path = vendor/clay
+	url = https://github.com/nicbarker/clay.git

@@ -172,10 +172,18 @@ flip to the wasm target per milestone.
   mechanism: `_sh_get_hermes_runtime` (full JSI) as the shim API, with
   `drainMicrotasks()` after each core entry point. Size engineering is
   confirmed M6 work. See FINDINGS.md.
-- **M5 clay + ABI**: clay.c linked in-core and wrapped as the `layout`
-  cordis service; browser canvas2d host paints the RenderCommandArray via
-  rAF; host-supplied text measure (canvas `measureText`); input events flow
-  in. Carries the key open design question of the UI era: the
+- **M5 clay + ABI (in progress 2026-09-06 — see FINDINGS.md for the wall)**:
+  clay.c linked in-core and wrapped as the `layout` cordis service;
+  terminal-renderer host (SSH re-point; browser canvas2d waits for ticket #2)
+  paints the RenderCommandArray from wasm memory via build-derived wire
+  offsets; host-supplied text measure (monospace cell metrics backed by the
+  f32-scratch generalization of the M4 scratch-copy pattern); pointer + key
+  input flows in raw stdin → `core_pointer`. The demo bridges M4 + M5: the
+  button click routes core → cordis service → host bridge → plugin service,
+  and the plugin contributes per-frame UI fragments over the minimal
+  immediate vocabulary (`eded_vocab` → host → `_vui_dispatch`) — the
+  UI-declaration contract option 1 at toy scale, freeze still deferred.
+  Carries the key open design question of the UI era: the
   **UI-declaration contract** — how plugins get UI on screen (per-frame
   immediate clay calls across the ABI, batched element-fragment buffers, or
   a high-level panels service à la Koishi's console). Shapes the plugin ABI
@@ -228,8 +236,14 @@ flip to the wasm target per milestone.
 - **Clay text measure**: clay requires a host-supplied measure function; on
   web, back it with canvas `measureText` via an EM_JS trampoline (web rung)
   or a native font stack (desktop rung, ticket #3).
-- **Clay renderers exist upstream**: canvas2d, HTML, sokol, raylib, SDL2/3 —
-  crib, don't hand-roll.
+- **Clay renderers exist upstream**: canvas2d, HTML, sokol, raylib, SDL2/3,
+  termbox2, a pure-ANSI terminal renderer — crib, don't hand-roll.
+- **Clay embedding gotchas (v0.14)**: BeginLayout must precede all element
+  declarations; `Clay__QueryScrollOffset` stays NULL until assigned — stub
+  it before any CLIP element exists; `Clay_MinMemorySize` is
+  defaults-dependent (~6.1 MB measure vs ~4.9 earlier) — probe, never
+  hardcode; the AOT core has no `console` (route logs via a JSI `host_log`).
+  Full list in FINDINGS.md M5.
 - **emcc↔Wasmtime friction**: shermes's wasm output targets emscripten;
   ticket #3 must answer whether `STANDALONE_WASM` / a WASI rebuild is needed.
 

@@ -13,4 +13,5 @@ spike/**/cordis-bundle.js
 spike/**/core-bundle.js
 spike/**/toy.wasm
 !spike/plugin-bridge/toy.c
+!spike/clay-ui/clay-impl.c
 /suite-bundle*

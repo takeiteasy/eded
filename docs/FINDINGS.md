@@ -472,3 +472,136 @@ only trustworthy native signal, as M2 already concluded.
   a real error channel, plugin-side inject (deps declared across the bridge).
 - Numbers to re-take at M6: instantiate cost per JS plugin module (memory as
   well as bytes — each carries its own heap), and stripped/-Os sizes.
+
+## M5 — clay + ABI (2026-09-06) : IN PROGRESS — blocked (see below)
+
+### What was built (`spike/clay-ui/`)
+
+Renders are re-pointed from the browser-canvas rung to a **terminal renderer**
+(SSH session; visual inspection happens in the terminal). Renderer approach
+re-pointed with user decision: host-side **JS cell-buffer ANSI painter**
+(ported structure from clay's upstream `renderers/termbox2` + command
+semantics from `renderers/terminal`; no termbox dependency). The real termbox2
+C renderer waits for ticket #3's native host, next to sokol.
+
+- **Vendor**: clay v0.14 as pinned submodule (`vendor/clay`, commit
+  `b25a31c`). Full TUI probe suite planned identical in spirit to M4's.
+- **`clay-impl.c`** — single C99 TU providing CLAY_IMPLEMENTATION +:
+  host-supplied text measure (monospace: width = ASCII bytes × 8 px, one
+  terminal row per line, computed host-side and returned through an f32
+  scratch pair — the M4 scratch-copy pattern generalized), error handler
+  (logged into JS-land via EM_JS, counted), the immediate-mode vocabulary
+  (pending `Clay_ElementDeclaration` state machine: setters → `clay_open` →
+  children → `clay_close`), the bridge-vocabulary dispatch (`vui(fn,a,b)`:
+  COLOR/BOX/TEXT/END), and wire-offset helpers (`cmd_*`/`arr_*`) exporting
+  offsetof/sizeof values computed **inside the real build** so the host-side
+  render-command DataView parser agrees with the module by construction.
+- **Core shim + entry** — clay linked in-core; vocabulary attached as JSI
+  functions; `core-entry.js` provides the injectable **`layout` cordis
+  service** (invariant 1b) and builds an M5 demo tree through it each frame;
+  registered bridge plugins are invited to draw per-frame UI fragments over
+  `host_plugin_call(FN_UI)`.
+- **ABI v0.1 additions**: exports `_core_dimensions/_core_pointer/_core_frame/
+  _core_render_ptr/_core_render_len/_vui_dispatch`, imports
+  `host_measure_text` (f32 scratch-pair result). All JS/bridge flow syncs —
+  no microtask draining anywhere in the frame path (invariant 3 held).
+- **Plugin side** (`js-plugin.cpp` extended + `plugin-ui.js`): the OUT-CALL
+  route now exists — plugin JS calls `eded_vocab(fn,a,b)` → host bridge →
+  core `_vui_dispatch`; text crosses separate memories via `eded_text(s)` →
+  plugin linear memory → host copies into core scratch (HEAPU8↔HEAPU8).
+- **Host renderer** (`ui-renderer.mjs`): parse commands from core memory via
+  build-derived offsets; paint into a char/fg/bg cell buffer; diff-flush
+  truecolor ANSI; SGR-mouse + key decode (raw stdin); alt-screen session.
+- Probe suite: p0 init, p1 frame→commands, p2 measure import fired, p3 wire
+  parse, p4 id-located hover paint, p5 click→bridge→plugin→42, p6 plugin
+  fragment text, sync/trace checks. TUI demo mode (`--tui`) prepared.
+
+### The key discovery so far: clay's immediate ordering
+
+`Clay_BeginLayout()` **must precede all element declarations** — building the
+tree first then calling Begin/EndLayout yields an empty failing open-element
+stack (clay internal "out of bounds" errors, zero commands). The shim now
+frames every frame `clay_begin() → JS build → clay_output()`.
+
+### Bugs fixed on the way
+
+1. **Scroll-query NULL pointer**: `Clay__QueryScrollOffset` is a global that
+   stays NULL in a pure embedding; any CLIP element creates scroll state and
+   dereferences it → native infinite loop / wasm "function signature
+   mismatch" + abort. Boot now assigns a total stub.
+   (`Clay_SetExternalScrollHandlingEnabled(true)` without providing the
+   pointer has the same hazard.)
+2. **Vendored v0.14 header quirks** (differs from main): `Clay_EndLayout()`
+   takes no dt; `Clay__OpenTextElement(Clay_String, Clay_TextElementConfig*)`
+   is pointer-style; `Clay_BeginLayout` internally pushes the root container
+   index onto `openLayoutElementStack` **and then explicitly adds it again** —
+   the stack starts each frame at length 2 in v0.14. Verified harmless in
+   natively-compiled probes of the exact demo tree (0 errors, expected
+   commands), so it is a property of v0.14, not our bug — but it makes
+   stack-length assertions frame-relative (Begin+1, not 0).
+3. **Clay_MinMemorySize at v0.14 defaults ≈ 6.1 MB** — the static arena is
+   8 MB BSS; `minmem` probe recorded 4896768 under one build and 6133248
+   under another (defaults-dependent — always probe, never hardcode).
+4. **No `console` inside the AOT core**: shermes runtime globals lack it even
+   with `shermes_console_a` linked. All core JS logging routes through a
+   `host_log(str)` JSI function (EM_JS → glue `console.error`). M4 got away
+   with silence; M5 frame telemetry needs the channel.
+5. **The `shermes -emit-c CWD` trap** (already in plan.md gotchas) re-bitten:
+   generated C/o files land in the CWD; pipeline scripts keep cd-ing first.
+6. C++17 vs clay.h: `#include clay.h` fails a C++20 guard — keep ALL
+   clay-facing code in the C99 TU (`clay-impl.c`); the shim only declares its
+   extern surface. Bonus constraint: `#include "clay.h"` from a file in a
+   directory that happens to contain a DIFFERENT clay.h silently resolves to
+   the wrong one (quoted-include path rule) — happened once during native
+   probing and produced phantom API-signature confusion.
+
+### THE WALL (blocking, bisected to the boundary)
+
+The exact demo tree (root + stat row + bordered panel + clip-scissor box +
+hover button; 6 opens / 6 closes, ids on one element) compiles and runs green
+in a pure-C probe — under clang native AND under emcc wasm + node: 0 errors,
+16 render commands per frame. The SAME tree driven through **JSI-attached
+host functions** inside the shermes AOT core produces, per frame:
+
+- 9 `CLAY_ERROR_TYPE_INTERNAL_ERROR` ("out of bounds array access") during
+  `Clay_EndLayout`→`CalculateFinalLayout`,
+- `renderCommands.length = 0`,
+- and — decisive observation — the **last `svc.close()` (root panel) never
+  reaches `clay_close`** (in C-instrumented close logs it is absent), while
+  the frame still returns `rc = 0` and the JS try/catch in `eded_ui_frame`
+  never observes a throw.
+
+Bisect state: minimal trees (root + texts; root + stat + panel) are GREEN
+through the JSI path; no crash — but stage-B features (clip box initially
+hard-crashed via the scroll-query bug — fixed; after the fix the missing
+-close divergence appears). All p0/p1/p2 core-level probes PASS; frame
+output is empty only for the full tree.
+
+Working hypotheses for the next session (unverified):
+1. JSI host-function re-entrancy during the plugin-call-free build is
+   correlated: bisect by swapping the JSI-attached vocabulary for direct
+   EM_JS calls in the frame path (shermes→C without the JSI hop) — if green,
+   the problem is in the HFContext marshaling of multi-arg host functions.
+2. The missing final close shows the JS build *did* stop early —
+   instrument each svc method with a host_log marker to find the exact last
+   statement executed (previous markers eliminated up to `f:close` of the
+   button; the gap is between button-close and root-close).
+3. Try `-O3 → -O1` for the core wasm build to rule out clang/emcc
+   miscompilation interaction with the shermes-generated C.
+
+### Numbers (partial M5)
+
+- core module (cordis + bridge + clay + shim): **4.0 MB** (-O3, unstripped;
+  M4's core was 3.83 MB → clay costs ~+0.17 MB file-wise; the 8 MB arena is
+  BSS, so it costs linear memory, not file size).
+- demo plugin (`plugin-ui-wasm`): 3.16 MB (unchanged floor; the plugin shim
+  additions are a few hundred bytes of code).
+- Clay_MinMemorySize defaults: ~6.1 MB (→ BSS arena).
+
+### Carried to M6
+
+- Same as before plus: wire-format offset exports proved already (parseable
+  command stream confirmed on partial trees — n:3/7 in bisect runs); measure
+  import fires and returns sane monospace metrics (dbg-verified values);
+  `-Xes6-block-scoping` caveat DOES apply to core-entry.js loop closures —
+  keep in compile.sh (baked).
